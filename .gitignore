@@ -1,0 +1,18 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Generated PDF reports
+reports/
+
+# SQLite database
+report.db
+
+# Environment variables / secrets
+.env
+
+# VS Code
+.vscode/
