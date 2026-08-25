@@ -24,6 +24,16 @@ def initialize_report_table():
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idempotency_keys (
+                key TEXT PRIMARY KEY,
+                report_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (report_id) REFERENCES reports(id)
+            )
+            """
+        )
 
         connection.commit()
 

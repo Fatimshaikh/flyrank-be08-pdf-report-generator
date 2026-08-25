@@ -1,8 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
+
 from app.database import get_connection, initialize_report_table
 from app.report_service import create_report
-from pathlib import Path
-from fastapi.responses import FileResponse
 
 app = FastAPI(title="FlyRank PDF Report Generator")
 
@@ -16,9 +18,10 @@ def health_check():
 
 
 @app.post("/reports")
-def create_report_endpoint():
-    return create_report()
-
+def create_report_endpoint(
+    idempotency_key: str = Header(..., alias="Idempotency-Key")
+):
+    return create_report(idempotency_key)
 
 @app.get("/reports/{report_id}")
 def get_report(report_id: str):
