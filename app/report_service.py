@@ -1,13 +1,21 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.database import get_connection
-from app.pdf_generator import generate_pdf
-from app.report_queries import get_report_data
+from app.report_worker import process_report
 
 
-def create_report(idempotency_key: str):
-    # First: check whether this request was already processed.
+executor = ThreadPoolExecutor(max_workers=2)
+
+
+def create_report_job(idempotency_key: str):
+    """
+    Create a queued report and submit the actual work
+    to the background executor.
+    """
+
+    # Check whether this idempotency key was already used.
     connection = get_connection()
 
     try:
@@ -48,15 +56,9 @@ def create_report(idempotency_key: str):
             "download_url": f"/reports/{report['id']}/file",
         }
 
-    # New request: generate a new report.
+    # Create a new queued report.
     report_id = str(uuid4())
-
-    report_data = get_report_data()
-
-    pdf_path = generate_pdf(
-        report_id=report_id,
-        report_data=report_data,
-    )
+    now = datetime.now(timezone.utc).isoformat()
 
     connection = get_connection()
 
@@ -73,9 +75,9 @@ def create_report(idempotency_key: str):
             """,
             (
                 report_id,
-                "completed",
-                str(pdf_path),
-                datetime.now(timezone.utc).isoformat(),
+                "queued",
+                None,
+                now,
             ),
         )
 
@@ -91,7 +93,7 @@ def create_report(idempotency_key: str):
             (
                 idempotency_key,
                 report_id,
-                datetime.now(timezone.utc).isoformat(),
+                now,
             ),
         )
 
@@ -100,8 +102,11 @@ def create_report(idempotency_key: str):
     finally:
         connection.close()
 
+    # Submit the expensive work to the background worker.
+    executor.submit(process_report, report_id)
+
     return {
         "id": report_id,
-        "status": "completed",
+        "status": "queued",
         "download_url": f"/reports/{report_id}/file",
     }

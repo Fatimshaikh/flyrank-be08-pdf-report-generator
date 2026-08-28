@@ -24,6 +24,7 @@ def initialize_report_table():
             )
             """
         )
+
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -34,6 +35,37 @@ def initialize_report_table():
             )
             """
         )
+
+        connection.commit()
+
+    finally:
+        connection.close()
+
+def add_report_job_columns():
+    connection = get_connection()
+
+    try:
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(reports)"
+            ).fetchall()
+        }
+
+        if "started_at" not in columns:
+            connection.execute(
+                "ALTER TABLE reports ADD COLUMN started_at TEXT"
+            )
+
+        if "completed_at" not in columns:
+            connection.execute(
+                "ALTER TABLE reports ADD COLUMN completed_at TEXT"
+            )
+
+        if "error_message" not in columns:
+            connection.execute(
+                "ALTER TABLE reports ADD COLUMN error_message TEXT"
+            )
 
         connection.commit()
 
