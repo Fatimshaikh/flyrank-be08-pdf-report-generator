@@ -1,113 +1,140 @@
 # FlyRank PDF Report Generator
 
-A backend service that generates sales reports as PDF files.
+A backend service that generates sales reports as PDF files using background processing.
+
+## Overview
 
 The project demonstrates a practical backend job pipeline:
 
-**SQL aggregation → HTML rendering → PDF generation → background processing → artifact storage → API download**
+**SQL aggregation → HTML rendering → PDF generation → background job → artifact storage → API**
 
-It also includes **idempotency** and **failure handling**, so repeated requests do not create duplicate reports and failed jobs are recorded in the database.
+The system creates a report request, immediately returns a job ID, processes the report in the background, and stores the generated PDF on disk.
 
----
+## Tech Stack
+
+* Python 3.11
+* FastAPI
+* SQLite
+* Jinja2
+* Playwright + Chromium
+* Uvicorn
+* ThreadPoolExecutor
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    Client[Client / API Consumer]
-
-    Client -->|POST /reports<br/>Idempotency-Key| API[FastAPI API]
+    Client[Client] --> API[FastAPI API]
 
     API --> Service[Report Service]
+    Service --> DB[(SQLite)]
 
-    Service -->|Check key| DB[(SQLite)]
+    Service --> Queue[Background Executor]
+    Queue --> Worker[Report Worker]
 
-    Service -->|Create queued report| DB
-
-    Service -->|Submit background job| Executor[ThreadPoolExecutor]
-
-    Executor --> Worker[Report Worker]
-
-    Worker -->|status: running| DB
-    Worker --> Queries[Report Queries]
+    Worker --> Queries[SQL Aggregation]
     Queries --> DB
 
-    Worker --> Data[Report Data]
-    Data --> Jinja[Jinja2 HTML Template]
+    Worker --> Jinja[Jinja2 HTML Template]
+    Jinja --> PDF[Playwright + Chromium]
+    PDF --> Storage[(PDF File Storage)]
 
-    Jinja --> Playwright[Playwright / Chromium]
-    Playwright --> PDF[PDF Artifact]
+    Worker --> DB
 
-    PDF --> Reports[reports/ directory]
-    Worker -->|status: completed + file_path| DB
+    Client -->|GET report status| API
+    Client -->|GET PDF| API
+    API --> Storage
+```
 
-    Worker -->|status: failed + error_message| DB
+## API Endpoints
 
-    Client -->|GET /reports/{id}| API
-    API -->|Job status| DB
+### Health Check
 
-    Client -->|GET /reports/{id}/file| API
-    API -->|Serve PDF| Reports
+```http
+GET /health
+```
 
-## Job Lifecycle
-queued
-   │
-   ▼
-running
-   │
-   ├──────────────► completed
-   │                    │
-   │                    ▼
-   │                PDF available
-   │
-   └──────────────► failed
-                        │
-                        ▼
-                  error_message stored
+Returns:
 
-## What the Project Does
+```json
+{"status": "ok"}
+```
 
-When a client requests a report:
+### Create Report
 
-The API receives a POST /reports request.
-An Idempotency-Key is checked.
-A new report record is created with queued status.
-The job is submitted to a background ThreadPoolExecutor.
-The worker changes the job status to running.
-SQL queries calculate report metrics from the orders table.
-Jinja2 renders the report HTML.
-Playwright uses Chromium to convert the HTML into a PDF.
-The PDF is stored in the reports/ directory.
-The database record is updated to completed.
-The client can retrieve the report status and download the PDF.
+```http
+POST /reports
+Idempotency-Key: unique-key
+```
 
-If processing fails, the worker changes the status to failed and stores the error message.
+Returns immediately:
 
-## Tech Stack
+```json
+{
+  "id": "report-id",
+  "status": "queued",
+  "download_url": "/reports/report-id/file"
+}
+```
 
-Python 3.11
-FastAPI — REST API
-Uvicorn — ASGI server
-SQLite — database
-Jinja2 — HTML templating
-Playwright — browser automation and PDF generation
-Chromium — headless browser used by Playwright
-ThreadPoolExecutor — in-process background job execution
-Git — version control
+### Get Report Status
 
-## Project Structure 
+```http
+GET /reports/{report_id}
+```
 
+Returns the current status:
+
+* `queued`
+* `running`
+* `completed`
+* `failed`
+
+### Download Report
+
+```http
+GET /reports/{report_id}/file
+```
+
+Returns the generated PDF.
+
+## Background Processing
+
+Report generation is handled by `ThreadPoolExecutor`.
+
+The API does not wait for PDF generation to finish. Instead:
+
+1. Create a report with `queued` status.
+2. Submit the job to the background executor.
+3. Worker changes status to `running`.
+4. SQL queries generate the report data.
+5. Jinja2 renders the HTML.
+6. Playwright/Chromium generates the PDF.
+7. PDF path is stored in SQLite.
+8. Job becomes `completed`.
+
+If an error occurs, the worker stores the error message and changes the status to `failed`.
+
+## Idempotency
+
+The API supports an `Idempotency-Key`.
+
+If the same key is submitted again, the existing report is returned instead of creating another report.
+
+This prevents duplicate report generation when clients retry requests.
+
+## Project Structure
+
+```text
 flyrank-be08-pdf-report-generator/
 │
 ├── app/
-│   ├── __init__.py
 │   ├── main.py
 │   ├── database.py
 │   ├── report_queries.py
 │   ├── report_service.py
 │   ├── report_worker.py
 │   ├── pdf_generator.py
-│   │
 │   └── templates/
 │       └── report.html
 │
@@ -117,361 +144,89 @@ flyrank-be08-pdf-report-generator/
 │   └── generate_test_pdf.py
 │
 ├── reports/
-│   └── generated PDF files
-│
 ├── requirements.txt
 ├── README.md
-├── .gitignore
-└── report.db
+└── .gitignore
+```
 
-report.db and generated PDFs are ignored by Git.
+## Running Locally
 
-## Database
+Create and activate the virtual environment:
 
-The application uses SQLite with the following main tables.
-
-orders
-
-Stores the source sales/order data used to generate the report.
-
-reports
-
-Stores report jobs and their lifecycle information.
-
-Important fields:
-
-id
-status
-file_path
-created_at
-started_at
-completed_at
-error_message
-idempotency_keys
-
-Maps an idempotency key to the report created for that request.
-
-key
-report_id
-created_at
-
-This allows the API to return the same report when the same request is submitted again.
-
-## Report Generation
-
-The report contains:
-
-Total orders
-Total revenue
-Top 5 products by revenue
-Orders per day for the last 7 days
-
-The SQL aggregation is handled by:
-
-app/report_queries.py
-
-The HTML template is:
-
-app/templates/report.html
-
-PDF generation is handled by:
-
-app/pdf_generator.py
-## Background Processing
-
-Report generation can take time because it involves database queries, HTML rendering, and launching a browser to generate the PDF.
-
-Instead of making the API request wait for the entire process, the service uses a background worker:
-
-POST /reports
-      │
-      ▼
-create queued job
-      │
-      ▼
-return immediately
-      │
-      ▼
-background worker
-      │
-      ▼
-generate PDF
-
-The API initially returns:
-
-{
-  "id": "report-id",
-  "status": "queued",
-  "download_url": "/reports/report-id/file"
-}
-
-The worker processes the report independently.
-
-## Idempotency
-
-The report creation endpoint requires:
-
-Idempotency-Key
-
-For example:
-
-curl -X POST http://127.0.0.1:8001/reports \
-  -H "Idempotency-Key: sales-report-001"
-
-The first request creates a report.
-
-Submitting the same key again returns the original report instead of creating another report.
-
-Example:
-
-Request 1 → report A
-Request 2 → same key → report A
-
-A different key creates a different report:
-
-Request 1 → report A
-Request 2 → different key → report B
-
-## Failure Handling
-
-The background worker catches processing errors.
-
-If PDF generation or another processing step fails:
-
-status = failed
-error_message = <exception message>
-
-The job also retains its started_at timestamp.
-
-This makes failures visible instead of silently losing background jobs.
-
-Failure handling was tested by intentionally replacing PDF generation with a function that raises an exception.
-
-## API Endpoints
-Health Check
-GET /health
-
-Response:
-
-{
-  "status": "ok"
-}
-Create Report
-POST /reports
-
-Required header:
-
-Idempotency-Key: unique-key
-
-Example response:
-
-{
-  "id": "1a1b7320-43d7-4ae2-8fdb-c1e4fa34f588",
-  "status": "queued",
-  "download_url": "/reports/1a1b7320-43d7-4ae2-8fdb-c1e4fa34f588/file"
-}
-
-## Get Report Status
-GET /reports/{report_id}
-
-Example completed response:
-
-{
-  "id": "1a1b7320-43d7-4ae2-8fdb-c1e4fa34f588",
-  "status": "completed",
-  "created_at": "2026-08-28T18:49:44.549343+00:00",
-  "download_url": "/reports/1a1b7320-43d7-4ae2-8fdb-c1e4fa34f588/file"
-}
-
-## Download Report
-GET /reports/{report_id}/file
-
-Returns the generated PDF when the report artifact exists.
-
-Running the Project
-1. Activate the virtual environment
-
-## Git Bash:
-
+```bash
+python -m venv .venv
 source .venv/Scripts/activate
-2. Install dependencies
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
-3. Install Playwright Chromium
 playwright install chromium
-4. Seed the database
+```
+
+Seed the database:
+
+```bash
 python scripts/seed.py
-5. Start the API
+```
+
+Start the API:
+
+```bash
 python -m uvicorn app.main:app --port 8001
-
-The API will be available at:
-
-http://127.0.0.1:8001
+```
 
 Health check:
 
-http://127.0.0.1:8001/health
-
-## Testing the Report Pipeline
+```bash
+curl http://127.0.0.1:8001/health
+```
 
 Create a report:
 
-curl --max-time 10 -s \
-  -X POST http://127.0.0.1:8001/reports \
-  -H "Idempotency-Key: test-report-001"
+```bash
+curl -X POST http://127.0.0.1:8001/reports \
+  -H "Idempotency-Key: test-001"
+```
 
-The initial response should normally have:
+Then use the returned report ID to check its status:
 
-status: queued
+```bash
+curl http://127.0.0.1:8001/reports/<REPORT_ID>
+```
 
-Then check the returned report ID:
+## Validation
 
-curl --max-time 10 -s \
-  http://127.0.0.1:8001/reports/<REPORT_ID>
+The project was tested for:
 
-Once the status becomes:
-
-completed
-
-download the PDF:
-
-curl -o downloaded-report.pdf \
-  http://127.0.0.1:8001/reports/<REPORT_ID>/file
-Testing Idempotency
-
-Send the same request twice:
-
-curl -s \
-  -X POST http://127.0.0.1:8001/reports \
-  -H "Idempotency-Key: idempotency-test-001"
-
-Then send it again with the same key:
-
-curl -s \
-  -X POST http://127.0.0.1:8001/reports \
-  -H "Idempotency-Key: idempotency-test-001"
-
-Both responses should reference the same report ID.
-
-Testing Failure Handling
-
-A failure was tested by intentionally replacing generate_pdf with a function that raises an exception.
-
-The expected database state is:
-
-status = failed
-error_message = TEST FAILURE - PDF generation failed
-
-This verifies that background processing errors are persisted.
-
-## Challenges Encountered
-Port conflict
-
-After restarting the machine, port 8000 was already occupied by another process.
-
-The project was temporarily run on port 8001:
-
-python -m uvicorn app.main:app --port 8001
-
-The health endpoint was successfully verified:
-
-{
-  "status": "ok"
-}
-Background executor lifecycle
-
-A direct Python command that submitted a background job exited immediately. This caused:
-
-cannot schedule new futures after interpreter shutdown
-
-The issue was resolved by running the FastAPI application as a long-lived process before submitting background jobs.
-
-Failure-path testing
-
-The worker was intentionally forced to fail to verify that exceptions were persisted correctly in the reports table.
+* Python compilation
+* API health endpoint
+* Report creation
+* Background processing
+* PDF generation
+* PDF download
+* Idempotent requests
+* Worker failure handling
+* Report status tracking
 
 ## Git History
 
-The project was built incrementally through stages:
+The implementation was developed incrementally:
 
-Stage 0 — setup ready
-Stage 1 — seeded report.db
-Stage 2 — aggregation queries
+```text
+Stage 0 — Setup
+Stage 1 — Seed database
+Stage 2 — Aggregation queries
 Stage 3 — HTML to PDF rendering
-Stage 4 — report API and artifact handling
-Stage 5 — idempotent report creation
-Stage 6 — background report processing
+Stage 4 — Report API and artifact handling
+Stage 5 — Idempotent report creation
+Stage 6 — Background report processing
+Documentation — Architecture and README
+```
 
-Example Git history:
+## Assignment
 
-53f84b1 Stage 6: background report processing
-357e27c Stage 5: add idempotent report creation
-2f3aa81 Stage 4: report API and artifact handling
-dd51049 Stage 3: HTML to PDF rendering
-19d3f9e Stage 2: aggregation queries
-beb2e68 Stage 1: seeded report.db
-ae4e2b4 Stage 0: setup ready
+**BE-08 — Backend AI Engineering**
 
-## Design Decisions
-Why SQLite?
-
-SQLite keeps the project lightweight while providing real relational database behavior, SQL aggregation, transactions, and persistent job state.
-
-Why background processing?
-
-PDF generation is more expensive than a simple database/API operation. Background processing prevents the API request from waiting for the entire report-generation pipeline.
-
-Why store the PDF as an artifact?
-
-The PDF is a generated artifact and can be stored on disk while the database stores its path. The API then returns a URL that can be used to retrieve the artifact.
-
-Why idempotency?
-
-Clients can retry requests because of network failures or timeouts. Idempotency prevents a retry from accidentally generating another identical report.
-
-## Current Scope
-
-This project intentionally uses an in-process ThreadPoolExecutor.
-
-It is suitable for demonstrating the background-job pattern in a small backend application.
-
-For a production distributed system, the background execution layer could later be replaced with a durable job queue such as:
-
-Redis + Celery
-RabbitMQ
-Kafka
-Cloud Tasks
-AWS SQS
-Google Cloud Tasks
-
-Similarly, local PDF storage could later be replaced with object storage such as:
-
-Amazon S3
-Google Cloud Storage
-Azure Blob Storage
-MinIO
-
-## Future Improvements
-
-Possible future extensions:
-
-Durable external job queue
-Scheduled report generation
-Authentication and authorization
-Pagination for report history
-Report listing endpoint
-Object storage for PDF artifacts
-Job retry mechanism
-Job timeout handling
-Structured logging
-Automated tests
-Docker containerization
-CI/CD pipeline
-PostgreSQL instead of SQLite
-Monitoring and metrics
-Project Goal
-
-The goal of this project is to demonstrate a complete backend workflow rather than a single API endpoint:
-
-receive a request → create a job → process data → generate an artifact → persist job state → expose the artifact through an API → safely handle retries and failures.
-
-**One correction before you paste it:** your current Git history ends at **Stage 6**, not Stage 7, because your attempted Stage 7 commit had `nothing to commit`. So I intentionally labeled the history accordingly.
+The project demonstrates SQL aggregation, API design, idempotency, background jobs, error handling, artifact storage, HTML templating, and PDF generation.
